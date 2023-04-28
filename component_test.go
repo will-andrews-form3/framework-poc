@@ -30,7 +30,7 @@ func TestNewService(t *testing.T) {
 	// NOTE: Technically this shouldn't matter since the caller isn't specifying the order in which the components should be
 	// started, just the components to start. However for the sake of this POC, it proves that we aren't calling a dependent
 	// component first
-	assert.True(t, a.startedAt.UnixNano() < b.startedAt.UnixNano())
+	require.True(t, a.startedAt.Before(b.startedAt))
 }
 
 func TestNewServiceWithDependents(t *testing.T) {
@@ -54,7 +54,7 @@ func TestNewServiceWithDependents(t *testing.T) {
 	assert.Equal(t, 1, b.startCallCount)
 
 	// check that component b was started before a since a depends on b
-	require.True(t, a.startedAt.UnixNano() > b.startedAt.UnixNano())
+	require.True(t, b.startedAt.Before(a.startedAt))
 }
 
 func TestNewServiceWithCyclicDependency(t *testing.T) {
@@ -89,7 +89,7 @@ func TestNewServiceWithExistingDependency(t *testing.T) {
 	assert.Equal(t, alreadyRegisteredError, err)
 }
 
-func TestNewServiceWithMutliLayerDependencies(t *testing.T) {
+func TestNewServiceWithMultiLayerDependencies(t *testing.T) {
 	a := &CompA{}
 	b := &CompB{}
 	c := &CompC{}
@@ -117,18 +117,89 @@ func TestNewServiceWithMutliLayerDependencies(t *testing.T) {
 	assert.Equal(t, 1, c.startCallCount)
 
 	// check that component b was started before a since a depends on b
-	require.True(t, a.startedAt.UnixNano() > b.startedAt.UnixNano())
+	require.True(t, b.startedAt.Before(a.startedAt))
 
 	// check that component c was started before b since b depends on c
-	require.True(t, b.startedAt.UnixNano() > c.startedAt.UnixNano())
+	require.True(t, c.startedAt.Before(b.startedAt))
+}
+
+func TestServiceStop(t *testing.T) {
+	a := &CompA{}
+	b := &CompB{}
+
+	// create a service with the components
+	service := NewService([]Component{a, b})
+
+	// configure a to depend on b
+	err := service.RegisterDependentComponents(a, b)
+	require.NoError(t, err)
+
+	err = service.Start(context.Background())
+	require.NoError(t, err)
+
+	service.Stop(context.Background())
+
+	// check that both components were stopped and that stop() was only called once
+	assert.False(t, a.started)
+	assert.Equal(t, 1, a.stopCallCount)
+	assert.False(t, b.started)
+	assert.Equal(t, 1, b.stopCallCount)
+
+	// check that component b was stopped after a since a depends on b and so a should be shut down first
+	require.True(t, b.stoppedAt.After(a.stoppedAt))
+}
+
+func TestServiceStopMultiLayeredDependencies(t *testing.T) {
+	a := &CompA{}
+	b := &CompB{}
+	c := &CompC{}
+
+	// create a service with the components
+	service := NewService([]Component{a, b, c})
+
+	// configure a to depend on b
+	err := service.RegisterDependentComponents(a, b)
+	require.NoError(t, err)
+
+	// configure component a to also depend on c
+	err = service.RegisterDependentComponents(a, c)
+	require.NoError(t, err)
+
+	// configure component b to depend on component c
+	err = service.RegisterDependentComponents(b, c)
+	require.NoError(t, err)
+
+	err = service.Start(context.Background())
+	require.NoError(t, err)
+
+	service.Stop(context.Background())
+
+	// check that all components were stopped and that stop() was only called once
+	assert.False(t, a.started)
+	assert.Equal(t, 1, a.stopCallCount)
+	assert.False(t, b.started)
+	assert.Equal(t, 1, b.stopCallCount)
+	assert.False(t, c.started)
+	assert.Equal(t, 1, c.stopCallCount)
+
+	// check that component b was stopped after a since a depends on b and so a should be shut down first
+	require.True(t, b.stoppedAt.After(a.stoppedAt))
+
+	// check that component c was stopped after b since b depends on c and so b should be shut down first
+	require.True(t, c.stoppedAt.After(b.stoppedAt))
+
+	// check that component c was stopped after a since a depends on c and so a should be shut down first
+	require.True(t, c.stoppedAt.After(a.stoppedAt))
 }
 
 // Some dummy components
 
 type CompA struct {
 	startCallCount int
+	stopCallCount  int
 	started        bool
 	startedAt      time.Time
+	stoppedAt      time.Time
 }
 
 func (a *CompA) Start(ctx context.Context) error {
@@ -143,13 +214,21 @@ func (a *CompA) Start(ctx context.Context) error {
 }
 
 func (a *CompA) Stop(ctx context.Context) error {
+	a.started = false
+	a.stopCallCount++
+
+	// simulate some stuff like closing connections
+	time.Sleep(time.Millisecond * 100)
+	a.stoppedAt = time.Now()
 	return nil
 }
 
 type CompB struct {
 	startCallCount int
+	stopCallCount  int
 	started        bool
 	startedAt      time.Time
+	stoppedAt      time.Time
 }
 
 func (b *CompB) Start(ctx context.Context) error {
@@ -164,13 +243,21 @@ func (b *CompB) Start(ctx context.Context) error {
 }
 
 func (b *CompB) Stop(ctx context.Context) error {
+	b.started = false
+	b.stopCallCount++
+
+	// simulate some stuff like closing connections
+	time.Sleep(time.Millisecond * 100)
+	b.stoppedAt = time.Now()
 	return nil
 }
 
 type CompC struct {
 	startCallCount int
+	stopCallCount  int
 	started        bool
 	startedAt      time.Time
+	stoppedAt      time.Time
 }
 
 func (c *CompC) Start(ctx context.Context) error {
@@ -185,5 +272,11 @@ func (c *CompC) Start(ctx context.Context) error {
 }
 
 func (c *CompC) Stop(ctx context.Context) error {
+	c.started = false
+	c.stopCallCount++
+
+	// simulate some stuff like closing connections
+	time.Sleep(time.Millisecond * 100)
+	c.stoppedAt = time.Now()
 	return nil
 }

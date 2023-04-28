@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/pkg/errors"
 )
@@ -30,14 +31,18 @@ type Service struct {
 	components          []Component
 	dependantComponents map[Component][]Component
 	startedComponents   map[Component]bool
+
+	closingStack *Stack
 }
 
 // NewService creates a new service
 func NewService(components []Component) *Service {
+
 	return &Service{
 		components:          components,
 		dependantComponents: make(map[Component][]Component),
 		startedComponents:   make(map[Component]bool),
+		closingStack:        NewStack(),
 	}
 }
 
@@ -73,11 +78,6 @@ func (s *Service) RegisterDependentComponents(a, b Component) error {
 // will be returned without continuing to start the rest of the components.
 func (s *Service) Start(ctx context.Context) error {
 	for _, component := range s.components {
-		// check the component hasn't already been started due to it being a dependent component
-		if _, ok := s.startedComponents[component]; ok {
-			continue
-		}
-
 		err := s.startComponent(ctx, component)
 		if err != nil {
 			return errors.Wrap(err, "failed to start component")
@@ -87,7 +87,16 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
+func (s *Service) Stop(ctx context.Context) {
+	s.closingStack.Close(ctx)
+}
+
 func (s *Service) startComponent(ctx context.Context, component Component) error {
+	// check the component hasn't already been started due to it being a dependent component
+	if _, ok := s.startedComponents[component]; ok {
+		return nil
+	}
+
 	// first check for components that this component depends upon so that they can be started first
 	depComponents := s.checkForDependantComponents(component)
 
@@ -104,6 +113,19 @@ func (s *Service) startComponent(ctx context.Context, component Component) error
 	if err != nil {
 		return errors.Wrap(err, "failed to start component")
 	}
+
+	// We need to stop components in the opposite order that they are started. This is to ensure that
+	// dependency components are shut down after components that depend on them. By adding them to the
+	// closing stack here (which closes them in reverse order of being added), we ensure that dependency
+	// components are added before the components that depend on them, thus being shut down after the
+	// components that depend on them
+	s.closingStack.Add("something", CloseFunc(func(ctx context.Context) {
+		err := component.Stop(ctx)
+		if err != nil {
+			fmt.Printf("failed to stop component: %s\n", err)
+		}
+	}))
+
 	s.startedComponents[component] = true
 	return nil
 }
